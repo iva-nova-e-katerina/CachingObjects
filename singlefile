@@ -1,0 +1,392 @@
+/*
+ @author Ekaterina A. Ivanova (C) 2013
+ */
+package cachingobjects;
+
+import java.io.BufferedInputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.Serializable;
+import java.util.Date;
+import java.util.Enumeration;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+public class Cache implements CacheInterface {
+
+    private FileCache fileCache = new FileCache();
+    // private CacheRebuilder rebuilder;
+    private ConcurrentHashMap<Serializable, Serializable> cache =
+            new ConcurrentHashMap<Serializable, Serializable>();
+    private ConcurrentHashMap<Serializable, long[]> systemData = new ConcurrentHashMap<Serializable, long[]>();
+    // to stay in memory more then 600 seconds
+    final static int minFreq = 2;
+    static long lastTimeRebuilded = System.currentTimeMillis() - 590000; // less then minute after start
+
+    private Cache() {
+    }
+    
+    // прошло меньше 10 минут ?
+    static boolean checkFreq(long[] value) {
+        return value[0] + 600000 < System.currentTimeMillis();
+    }
+
+    public ConcurrentHashMap<Serializable, Serializable> getCache() {
+        return cache;
+    }
+
+    public void setCache(ConcurrentHashMap<Serializable, Serializable> cache) {
+        this.cache = cache;
+    }
+
+    public Serializable get( Serializable key) {
+        // rebuild cache not more then once in 10 minutes
+        if (lastTimeRebuilded + 600000 < System.currentTimeMillis()) {
+            Thread t = new Thread(new CacheRebuilder());
+            t.start();
+            lastTimeRebuilded = System.currentTimeMillis();
+        }
+        Serializable value = null;
+        if (cache.containsKey(key)) {
+            value = cache.get(key);
+        } else {
+            value = fileCache.get(key);
+        }
+        if (value != null) {
+            updateStatInformation(key);
+            System.out.println(Thread.currentThread()+" Cache said:  in memory cache has been found key:" + key + " and object=" + value); 
+            return value;
+        } else {
+            return null;
+        }
+    }
+
+    @Override
+    public Serializable delete( Serializable key) {
+        if (cache.containsKey(key)) {
+            return cache.remove(key);
+        } else {
+            return fileCache.delete(key);
+        }
+
+    }
+
+    private static class CacheInner {
+
+        private static final Cache INNER_INSTANCE = new Cache();
+    }
+
+    public static Cache getInstance() {
+        return CacheInner.INNER_INSTANCE;
+    }
+
+    private enum CacheLevel {
+
+        MEMORY, FILE;
+    }
+
+    private CacheLevel determCacheLevel( Serializable key) {
+
+        return CacheLevel.MEMORY;
+
+    }
+
+    private boolean updateStatInformation( Serializable key) {
+        long[] tuple = systemData.get(key);
+        if(tuple == null || tuple.length < 2)
+            return false;
+        if (tuple[0] + 600000 > System.currentTimeMillis()) {
+            tuple[1]++;
+        }
+        tuple[0] = System.currentTimeMillis();
+        systemData.put(key, tuple);
+        return false;
+    }
+
+    @Override
+    public boolean cache( Serializable key, Serializable value) {
+        switch (determCacheLevel(key)) {
+            case MEMORY:
+                updateStatInformation(key);
+                systemData.put(key, new long[]{System.currentTimeMillis(), 0});
+                System.out.println(Thread.currentThread()+" Cache said: caching to memory with key=" + key + " object=" + value); 
+                cache.putIfAbsent(key, value);
+
+                break;
+            case FILE:
+                fileCache.cache(key, value);
+                break;
+            default:
+                cache.putIfAbsent(key, value);
+        }
+        return true;
+    }
+
+    public class FileCache implements CacheInterface {
+
+        private final static String dir = "objects/";
+
+        private FileCache() {
+            File files = new File(dir);
+            if (!files.exists()) {
+                files.mkdirs();
+            }
+        }
+
+        private void checkDir(String path) {
+            File subdir = new File(path);
+            if (!subdir.exists()) {
+                subdir.mkdirs();
+            }
+        }
+
+        private boolean ifNotExist(Serializable value, String path) {
+
+            return false;
+        }
+
+        @Override
+        public boolean cache( Serializable key, Serializable object) {
+            if(object == null)
+                return false;
+            ObjectOutputStream out = null;
+            
+            String subDir = dir + String.valueOf(key.hashCode() + "/");
+            checkDir(subDir);
+            FileOutputStream s = null;
+            try {
+               
+                String filename = subDir + String.valueOf(java.lang.System.identityHashCode(key)) + ".ser";
+                boolean alreadyInCache = false;//ifNotExist(object, subDir);
+                if (alreadyInCache) {
+                    return false;
+                }
+                
+                s = new FileOutputStream(filename);
+                out = new ObjectOutputStream(s);
+                System.out.println(Thread.currentThread()+" FileCache said: saving to file with name:" + filename + " the key=" + key + " object " + object.getClass().getCanonicalName()); 
+                out.writeObject(key);
+               // out.flush();
+               // out.reset();
+                
+                out.writeObject(object);
+               // out.flush();
+                out.close();
+                s.close();
+                return true;
+            } catch (IOException ex) {
+                Logger.getLogger(Cache.class.getName()).log(Level.SEVERE, null, ex);
+            } finally {
+                try {
+                    out.close();
+                    s.close();
+                } catch (IOException ex) {
+                    Logger.getLogger(Cache.class.getName()).log(Level.SEVERE, null, ex);
+                }
+            }
+            return false;
+
+        }
+
+        @Override
+        public Serializable get( Serializable key) {
+            String subDir = dir + String.valueOf(key.hashCode() + "/");
+            File dir = new File(subDir);
+            File[] files = dir.listFiles();
+            if(files == null || files.length <=0)
+                return null;
+            for (File test : files) {
+
+                InputStream inputStream = null;
+                ObjectInputStream outputStream = null;
+                try {
+                    inputStream = new BufferedInputStream(new FileInputStream(test));
+                    
+                    outputStream = new ObjectInputStream(inputStream);
+                     Serializable keyValue = ( Serializable) outputStream.readObject();
+                    if (!key.equals(keyValue)) {
+                        outputStream.close();
+                        continue;
+                    } else {
+                         System.out.println(Thread.currentThread()+" FileCache said: key found:" + keyValue + " in file " + test);
+                        Serializable object = (Serializable) outputStream.readObject();
+                        System.out.println(Thread.currentThread()+" FileCache said: reading from file:" + test.getAbsolutePath() + " an object=" + object + " with key " + key); 
+                        Cache.this.updateStatInformation(keyValue);
+                        if (checkFreq(Cache.this.systemData.get(keyValue))) {
+                           
+                            Cache.this.fileCache.delete(keyValue);
+                            Cache.this.cache(keyValue, object);
+                        }
+                        return object;
+                    }
+                } catch (FileNotFoundException ex) {
+                    Logger.getLogger(Cache.class.getName()).log(Level.SEVERE, null, ex);
+                } catch (IOException ex) {
+                    Logger.getLogger(Cache.class.getName()).log(Level.SEVERE, null, ex);
+
+                } catch (ClassNotFoundException ex) {
+                    Logger.getLogger(Cache.class.getName()).log(Level.SEVERE, null, ex);
+                } finally {
+                    try {
+                        inputStream.close();
+                        outputStream.close();
+                    } catch (IOException ex) {
+                        Logger.getLogger(Cache.class.getName()).log(Level.SEVERE, null, ex);
+                    }
+                }
+            }
+
+            return null;
+            //throw new UnsupportedOperationException("Not supported yet.");
+        }
+
+        @Override
+        public Serializable delete( Serializable key) {
+            return null;
+            //throw new UnsupportedOperationException("Not supported yet.");
+        }
+    }
+
+    private class CacheRebuilder implements Runnable {
+
+        @Override
+        public void run() {
+            // move to files all less frequently accessed objects
+            Enumeration keys = Cache.this.cache.keys();//Cache.this.systemData.keys();
+            System.out.println(Thread.currentThread()+" CacheRebuilder said:  cache rebuild was started at " + new Date()) ; 
+            while (keys.hasMoreElements()) {
+                 Serializable key = ( Serializable) keys.nextElement();
+                long[] value = Cache.this.systemData.get(key);
+                // if value accessable less than necessary
+                // then move from memory to disk
+                if (!checkFreq(value)) {
+                    System.out.println(Thread.currentThread()+" CacheRebuilder said: moving TO file the object with key" + key); 
+                    Serializable object = Cache.this.cache.get(key);
+                    Cache.this.delete(key);
+                    Cache.this.fileCache.cache(key, object);
+                    // move from disk to memory
+                } else if (!Cache.this.cache.contains(key)) {
+                    System.out.println(Thread.currentThread()+" CacheRebuilder said: moving FROM file the object with key" + key); 
+                    Serializable object = Cache.this.fileCache.get(key);
+                    Cache.this.fileCache.delete(key);
+                    Cache.this.cache(key, object);
+                }
+
+            }
+
+        }
+    }
+}
+
+
+package cachingobjects;
+
+import java.io.Serializable;
+
+public interface CacheInterface {
+    boolean cache( Serializable key,  Serializable value);
+    Serializable get( Serializable key);
+    Serializable delete( Serializable key);
+    
+}
+
+
+/*
+@author Ekaterina A. Ivanova (C) 2013
+*/
+package cachingobjects;
+
+import java.io.Serializable;
+import java.util.concurrent.ConcurrentHashMap;
+
+
+public class CachingObjects {
+    
+    Cache cache;
+    private ConcurrentHashMap<String, long[]> controlData = new ConcurrentHashMap<String, long[]>();
+    private final long runTime = System.currentTimeMillis() + 150000; // 2.5 minutes
+    
+
+    public static void main(String[] args) {
+        int threadsCount = (int) (Math.random() * 15);
+        CachingObjects main = new CachingObjects();
+        main.cache = Cache.getInstance();
+        for(int i = 0; i < threadsCount ; i++){
+            Thread t = new Thread(main.new Tester());
+            t.start();
+        }
+            
+            
+    }
+    
+   
+    
+    
+    class Tester implements Runnable{
+
+        @Override
+        public void run() {
+            //int objectsCount = (int) (Math.random() * 100);
+            int loop = (int) (Math.random() * 1000000);
+            for(int i = 0 ; i < loop && System.currentTimeMillis() < runTime ; i++){
+                int branch = (int) (Math.random() * 10);
+                if(branch < 5){
+                    insertNewObject();
+                }else {
+                    // generate random key from last 10 minutes
+                    long past = (long) (System.currentTimeMillis() - Math.random() * 600000);
+                     Serializable ob = demandNewObject(past);
+                    
+                }
+               
+            }
+        }
+        
+        void insertNewObject(){
+             Test object = new Test();
+             object.intType -= Math.random()*10;
+             object.doubleType -= Math.random()*10;
+             object.stringType += Math.random()*100000;
+             long key = System.currentTimeMillis();
+             System.out.println(Thread.currentThread() + " said: new object created with key=" + key + "   " + object.toString());
+             CachingObjects.this.cache.cache(String.valueOf(key), object);
+             CachingObjects.this.controlData.put(String.valueOf(key), new long []{key, 0}); 
+        }
+        
+        
+         Serializable demandNewObject(long key){   
+            Serializable result = ( Serializable) CachingObjects.this.cache.get(String.valueOf(key));
+            System.out.println(Thread.currentThread() + " said: accessing to cache with key=" + key + " with result " + result );
+            return  result;
+        }
+        
+    }
+    
+
+}
+
+
+/*
+ @author Ekaterina A. Ivanova (C) 2013
+ */
+
+package cachingobjects;
+
+public class Test implements java.io.Serializable {
+
+    int intType = 6;
+    double doubleType = -7.67d;
+    String stringType = "hello";
+
+    @Override
+    public String toString() {
+        return String.valueOf(intType) + "|" + String.valueOf(doubleType) + "|" + stringType;
+    }
+}

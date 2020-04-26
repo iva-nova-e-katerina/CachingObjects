@@ -12,8 +12,17 @@ package cachingobjects;
 *
 */
 
+
+
+
 @FunctionalInterface
 public interface Cacher<R, K, V> {
 
+    /**
+     *
+     * @param key
+     * @param value
+     * @return
+     */
     R cache(K key, V value);
 }

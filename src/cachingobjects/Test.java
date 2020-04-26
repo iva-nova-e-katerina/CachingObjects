@@ -6,6 +6,11 @@ use.
 
 
 package cachingobjects;
+
+import static java.lang.String.valueOf;
+import static java.lang.String.valueOf;
+import java.util.logging.Logger;
+
 /*
  @author Ekaterina A. Ivanova (C) 2013
  */
@@ -18,6 +23,7 @@ class Test implements java.io.Serializable {
 
     @Override
     public String toString() {
-        return String.valueOf(intType) + "|" + String.valueOf(doubleType) + "|" + stringType;
+        return valueOf(intType) + "|" + valueOf(doubleType) + "|" + stringType;
     }
+    private static final Logger LOG = Logger.getLogger(Test.class.getName());
 }
